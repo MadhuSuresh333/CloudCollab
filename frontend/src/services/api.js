@@ -30,6 +30,11 @@ export const usersAPI = {
   updateProfile: (data) => api.put('/users/me', data),
 };
 
+// Config API (public)
+export const configAPI = {
+  get: () => api.get('/config'),
+};
+
 // Workspaces API
 export const workspacesAPI = {
   create: (data) => api.post('/workspaces', data),

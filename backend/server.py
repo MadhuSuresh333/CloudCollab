@@ -1,10 +1,10 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File as FastAPIFile
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File as FastAPIFile, WebSocket, WebSocketDisconnect, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
-from typing import List, Optional
+from typing import List, Optional, Dict, Set
 from datetime import datetime, timezone, timedelta
 from passlib.context import CryptContext
 import jwt
@@ -13,6 +13,8 @@ import logging
 from pathlib import Path
 import uuid
 import shutil
+import json
+import asyncio
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -40,6 +42,121 @@ security = HTTPBearer()
 # File upload directory
 UPLOAD_DIR = ROOT_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+# File validation constants
+MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "10"))
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+# Allowed file extensions (grouped by category)
+ALLOWED_FILE_EXTENSIONS = {
+    # Images
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp",
+    # Documents
+    ".pdf", ".doc", ".docx", ".odt", ".rtf", ".txt", ".md",
+    # Spreadsheets
+    ".xls", ".xlsx", ".csv", ".ods",
+    # Presentations
+    ".ppt", ".pptx", ".odp",
+    # Archives
+    ".zip", ".tar", ".gz", ".7z",
+    # Code
+    ".js", ".jsx", ".ts", ".tsx", ".py", ".java", ".c", ".cpp", ".h", ".css", ".html", ".json", ".xml", ".yaml", ".yml",
+    # Audio/Video (small samples only due to size limit)
+    ".mp3", ".wav", ".mp4", ".webm",
+}
+
+
+def validate_file(file: UploadFile, file_size: int) -> None:
+    """Validate file size and type. Raises HTTPException on failure."""
+    # Size validation
+    if file_size > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB, got {file_size / (1024*1024):.2f}MB"
+        )
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="File is empty")
+
+    # Extension validation
+    ext = Path(file.filename or "").suffix.lower()
+    if not ext:
+        raise HTTPException(status_code=400, detail="File has no extension")
+    if ext not in ALLOWED_FILE_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type '{ext}' not allowed. Allowed types: {', '.join(sorted(ALLOWED_FILE_EXTENSIONS))}"
+        )
+
+
+# ============================================
+# WEBSOCKET CONNECTION MANAGER
+# ============================================
+
+class DocumentConnectionManager:
+    """Manages WebSocket connections per document for real-time collaboration."""
+
+    def __init__(self):
+        # document_id -> list of {websocket, user_id, user_name}
+        self.connections: Dict[str, List[dict]] = {}
+
+    async def connect(self, document_id: str, websocket: WebSocket, user_id: str, user_name: str):
+        await websocket.accept()
+        if document_id not in self.connections:
+            self.connections[document_id] = []
+        self.connections[document_id].append({
+            "websocket": websocket,
+            "user_id": user_id,
+            "user_name": user_name,
+        })
+        # Notify others that a new user joined and send current active users list
+        await self.broadcast_active_users(document_id)
+
+    async def disconnect(self, document_id: str, websocket: WebSocket):
+        if document_id in self.connections:
+            self.connections[document_id] = [
+                c for c in self.connections[document_id] if c["websocket"] != websocket
+            ]
+            if not self.connections[document_id]:
+                del self.connections[document_id]
+            else:
+                await self.broadcast_active_users(document_id)
+
+    async def broadcast(self, document_id: str, message: dict, exclude_ws: Optional[WebSocket] = None):
+        """Broadcast a message to all connections for a document, optionally excluding one."""
+        if document_id not in self.connections:
+            return
+        payload = json.dumps(message)
+        dead = []
+        for conn in self.connections[document_id]:
+            if conn["websocket"] is exclude_ws:
+                continue
+            try:
+                await conn["websocket"].send_text(payload)
+            except Exception:
+                dead.append(conn)
+        # Cleanup dead connections
+        for d in dead:
+            if d in self.connections[document_id]:
+                self.connections[document_id].remove(d)
+
+    async def broadcast_active_users(self, document_id: str):
+        """Send the current list of active users to all connections."""
+        if document_id not in self.connections:
+            return
+        # Deduplicate by user_id (a user may have multiple tabs open)
+        seen = set()
+        active_users = []
+        for conn in self.connections[document_id]:
+            if conn["user_id"] not in seen:
+                seen.add(conn["user_id"])
+                active_users.append({"user_id": conn["user_id"], "user_name": conn["user_name"]})
+        await self.broadcast(document_id, {
+            "type": "active_users",
+            "users": active_users,
+        })
+
+
+doc_manager = DocumentConnectionManager()
 
 
 # ============================================
@@ -593,20 +710,24 @@ async def upload_file(
     member = await db.workspace_members.find_one({"workspace_id": workspace_id, "user_id": current_user.id})
     if not member:
         raise HTTPException(status_code=403, detail="Not a member of this workspace")
-    
+
+    # Read file contents into memory to validate size before saving to disk
+    contents = await file.read()
+    file_size = len(contents)
+
+    # Validate size and type (raises HTTPException on failure)
+    validate_file(file, file_size)
+
     # Create unique filename
     file_id = str(uuid.uuid4())
     file_extension = Path(file.filename).suffix
     unique_filename = f"{file_id}{file_extension}"
     file_path = UPLOAD_DIR / unique_filename
-    
+
     # Save file
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    # Get file size
-    file_size = file_path.stat().st_size
-    
+        buffer.write(contents)
+
     # Create file metadata
     file_metadata = FileMetadata(
         id=file_id,
@@ -617,12 +738,12 @@ async def upload_file(
         uploaded_by=current_user.id,
         uploaded_by_name=current_user.name
     )
-    
+
     file_dict = file_metadata.model_dump()
     file_dict['uploaded_at'] = file_dict['uploaded_at'].isoformat()
-    
+
     await db.files.insert_one(file_dict)
-    
+
     return file_metadata
 
 @api_router.get("/workspaces/{workspace_id}/files", response_model=List[FileMetadata])
@@ -923,6 +1044,155 @@ async def delete_task(task_id: str, current_user: User = Depends(get_current_use
     
     await db.tasks.delete_one({"id": task_id})
     return None
+
+
+# ============================================
+# CONFIG ENDPOINT (used by frontend for validation)
+# ============================================
+
+@api_router.get("/config")
+async def get_config():
+    """Public configuration used by the frontend (e.g. file upload limits)."""
+    return {
+        "max_file_size_mb": MAX_FILE_SIZE_MB,
+        "max_file_size_bytes": MAX_FILE_SIZE_BYTES,
+        "allowed_file_extensions": sorted(ALLOWED_FILE_EXTENSIONS),
+    }
+
+
+# ============================================
+# WEBSOCKET - REAL-TIME DOCUMENT COLLABORATION
+# ============================================
+
+async def _authorize_ws_for_document(document_id: str, token: str):
+    """Validate JWT and workspace membership for the given document.
+    Returns (user_doc, document_doc) on success, or None on failure."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            return None
+    except jwt.InvalidTokenError:
+        return None
+
+    user_doc = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not user_doc:
+        return None
+
+    document_doc = await db.documents.find_one({"id": document_id})
+    if not document_doc:
+        return None
+
+    member = await db.workspace_members.find_one({
+        "workspace_id": document_doc["workspace_id"],
+        "user_id": user_id,
+    })
+    if not member:
+        return None
+
+    return user_doc, document_doc
+
+
+@app.websocket("/api/ws/documents/{document_id}")
+async def websocket_document(websocket: WebSocket, document_id: str, token: str = Query(...)):
+    """WebSocket endpoint for real-time collaborative document editing.
+
+    Client messages:
+      { "type": "content_change", "content": "..." }
+      { "type": "title_change", "title": "..." }
+      { "type": "cursor", "position": <int> }   # optional presence signal
+
+    Server broadcasts (to all clients of the same document):
+      { "type": "content_change", "content": "...", "user_id": "...", "user_name": "..." }
+      { "type": "title_change", "title": "...", "user_id": "...", "user_name": "..." }
+      { "type": "cursor", "position": <int>, "user_id": "...", "user_name": "..." }
+      { "type": "active_users", "users": [ { "user_id": "...", "user_name": "..." } ] }
+    """
+    auth = await _authorize_ws_for_document(document_id, token)
+    if not auth:
+        await websocket.close(code=4401)
+        return
+
+    user_doc, document_doc = auth
+    user_id = user_doc["id"]
+    user_name = user_doc["name"]
+
+    await doc_manager.connect(document_id, websocket, user_id, user_name)
+
+    # Debounce/save state
+    save_lock = asyncio.Lock()
+    latest_content = {"content": None, "title": None}
+
+    async def persist_changes():
+        """Persist latest content/title to Mongo when there are changes."""
+        async with save_lock:
+            update_dict = {}
+            if latest_content["content"] is not None:
+                update_dict["content"] = latest_content["content"]
+                latest_content["content"] = None
+            if latest_content["title"] is not None:
+                update_dict["title"] = latest_content["title"]
+                latest_content["title"] = None
+            if update_dict:
+                update_dict["updated_at"] = datetime.now(timezone.utc).isoformat()
+                await db.documents.update_one({"id": document_id}, {"$set": update_dict})
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = msg.get("type")
+
+            if msg_type == "content_change":
+                content = msg.get("content", "")
+                latest_content["content"] = content
+                # Broadcast to others (not the sender)
+                await doc_manager.broadcast(document_id, {
+                    "type": "content_change",
+                    "content": content,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                }, exclude_ws=websocket)
+                # Fire-and-forget persistence (debounced by "latest" pattern)
+                asyncio.create_task(persist_changes())
+
+            elif msg_type == "title_change":
+                title = msg.get("title", "")
+                latest_content["title"] = title
+                await doc_manager.broadcast(document_id, {
+                    "type": "title_change",
+                    "title": title,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                }, exclude_ws=websocket)
+                asyncio.create_task(persist_changes())
+
+            elif msg_type == "cursor":
+                await doc_manager.broadcast(document_id, {
+                    "type": "cursor",
+                    "position": msg.get("position", 0),
+                    "user_id": user_id,
+                    "user_name": user_name,
+                }, exclude_ws=websocket)
+
+            elif msg_type == "ping":
+                await websocket.send_text(json.dumps({"type": "pong"}))
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logging.exception("WebSocket error for document %s: %s", document_id, e)
+    finally:
+        # Final flush of any pending changes
+        try:
+            await persist_changes()
+        except Exception:
+            pass
+        await doc_manager.disconnect(document_id, websocket)
 
 
 # ============================================

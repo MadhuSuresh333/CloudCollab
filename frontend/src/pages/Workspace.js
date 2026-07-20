@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { useAuth } from '@/contexts/AuthContext';
-import { workspacesAPI, documentsAPI, filesAPI, projectsAPI } from '@/services/api';
+import { workspacesAPI, documentsAPI, filesAPI, projectsAPI, configAPI } from '@/services/api';
 import { DOCUMENT, PROJECT, WORKSPACE } from '@/constants/testIds';
 import { useToast } from '@/hooks/use-toast';
 import { ArrowLeft, Plus, FileText, Upload, FolderKanban, Users, Trash2 } from 'lucide-react';
@@ -38,6 +38,7 @@ export default function Workspace() {
 
   // File upload
   const [uploading, setUploading] = useState(false);
+  const [uploadConfig, setUploadConfig] = useState({ max_file_size_mb: 10, allowed_file_extensions: [] });
 
   // Member invite
   const [showInviteDialog, setShowInviteDialog] = useState(false);
@@ -46,6 +47,9 @@ export default function Workspace() {
 
   useEffect(() => {
     loadWorkspaceData();
+    // Load public config (upload limits / allowed extensions)
+    configAPI.get().then((res) => setUploadConfig(res.data)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   const loadWorkspaceData = async () => {
@@ -112,7 +116,32 @@ export default function Workspace() {
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
+    // Reset the input so choosing the same file again re-triggers onChange
+    e.target.value = '';
     if (!file) return;
+
+    // Client-side validation (mirrors backend rules for a fast UX)
+    const maxBytes = (uploadConfig.max_file_size_mb || 10) * 1024 * 1024;
+    if (file.size > maxBytes) {
+      toast({
+        title: 'File too large',
+        description: `Maximum size is ${uploadConfig.max_file_size_mb}MB. Your file is ${(file.size / (1024 * 1024)).toFixed(2)}MB.`,
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const nameParts = file.name.split('.');
+    const ext = nameParts.length > 1 ? `.${nameParts.pop().toLowerCase()}` : '';
+    const allowed = uploadConfig.allowed_file_extensions || [];
+    if (allowed.length > 0 && ext && !allowed.includes(ext)) {
+      toast({
+        title: 'File type not allowed',
+        description: `'${ext}' is not permitted. Allowed types: ${allowed.slice(0, 10).join(', ')}${allowed.length > 10 ? '...' : ''}`,
+        variant: 'destructive',
+      });
+      return;
+    }
 
     setUploading(true);
     try {
@@ -121,8 +150,8 @@ export default function Workspace() {
       toast({ title: 'Success', description: 'File uploaded!' });
     } catch (error) {
       toast({
-        title: 'Error',
-        description: 'Failed to upload file',
+        title: 'Upload failed',
+        description: error.response?.data?.detail || 'Failed to upload file',
         variant: 'destructive',
       });
     } finally {
@@ -349,7 +378,9 @@ export default function Workspace() {
                 <div className="flex justify-between items-center">
                   <div>
                     <CardTitle>Files</CardTitle>
-                    <CardDescription>Uploaded files in this workspace</CardDescription>
+                    <CardDescription>
+                      Uploaded files in this workspace &middot; Max {uploadConfig.max_file_size_mb}MB per file
+                    </CardDescription>
                   </div>
                   <div>
                     <input
@@ -358,8 +389,10 @@ export default function Workspace() {
                       className="hidden"
                       onChange={handleFileUpload}
                       disabled={uploading}
+                      accept={(uploadConfig.allowed_file_extensions || []).join(',')}
+                      data-testid="file-upload-input"
                     />
-                    <Button asChild disabled={uploading}>
+                    <Button asChild disabled={uploading} data-testid="file-upload-button">
                       <label htmlFor="file-upload" className="cursor-pointer">
                         <Upload className="h-4 w-4 mr-2" />
                         {uploading ? 'Uploading...' : 'Upload File'}

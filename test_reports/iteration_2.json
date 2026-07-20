@@ -1,0 +1,42 @@
+{
+  "summary": "Iteration-2 comprehensive testing PASSED. All 50 backend pytest tests pass (36 regression + 14 new: 2 config, 7 file validation, 5 WebSocket collab). Frontend two-context Playwright verification of real-time collaboration PASSED: Live indicator, presence chip (Bob's 'B' avatar + '1 other editing'), content sync A->B, title sync both directions, MongoDB persistence via WS, disconnect removes chip. Frontend file-validation UI PASSED: 'Max 10MB per file' shown, client-side rejects .exe and >10MB with toast (0 backend requests fired), valid .txt uploads successfully.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "DocumentEditor presence", "issues": ["Minor: presence text 'B1 other editing' - Bob's avatar chip 'B' visually abuts the '1 other editing' text with no whitespace between them. Cosmetic only."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_new_features.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/pytest_new_features.xml"
+  ],
+  "action_items": [
+    "(Optional) Add margin/space between presence-avatar chip and '<n> other(s) editing' text in DocumentEditor.js so it doesn't visually merge (e.g. add ml-1 or gap on the wrapper).",
+    "(Carried over from iter-1, still valid) Consider splitting server.py (~1220 lines) into modules — auth, workspaces, documents, files, projects, tasks, ws — for maintainability.",
+    "(Carried over) CORS_ORIGINS='*' with allow_credentials=True is inconsistent — browsers reject credentialed CORS with wildcard."
+  ],
+  "critical_code_review_comments": [
+    "server.py file has grown to ~1220 lines with WebSocket + file validation additions. Recommend modularization for maintainability.",
+    "WebSocket handler uses `asyncio.create_task(persist_changes())` for each incoming message. Under rapid typing this creates many concurrent tasks that all take `save_lock`. The `latest_content` 'debounce' pattern works (tasks that lose the race become no-ops), but a single background writer task with an asyncio.Event would be cleaner and generate less DB traffic.",
+    "WebSocket auth uses 4401 close code on rejection which is a valid application-defined code, but browsers surface `wasClean=false` regardless; consider also sending a close reason string for easier debugging.",
+    "File validation reads entire file into memory (contents = await file.read()) before checking size — a client could theoretically stream up to available RAM before hitting the 10MB check. For production, prefer content-length header pre-check or streaming with early-abort. Acceptable for 10MB limit / MVP.",
+    "useDocumentSocket.js only reconnects on documentId change — if the WS drops mid-session (network blip) it does not auto-reconnect, and user only sees 'Offline' with no retry. Consider exponential-backoff reconnect."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_new_features.py (new — 14 tests: config, file validation, WebSocket collab)"
+  ],
+  "success_rate": {"backend": "100% (50/50)", "frontend": "100% (all iteration-2 flows verified)"},
+  "test_credentials": "Self-provisioned. Backend tests register fresh users per class with timestamped emails (pw=TestPass123!). Frontend Playwright test uses alice-<ts>@t.com / bob-<ts>@t.com / pw123456.",
+  "seed_data_creation": "None — tests self-provision users, workspaces, documents, files, and clean up as needed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend WebSocket lives at /api/ws/documents/{document_id}?token=<jwt> (wss:// derived by replacing http->ws on REACT_APP_BACKEND_URL). Rejection close code is 4401. Server broadcasts {type: active_users|content_change|title_change|cursor} and does NOT echo the sender's own message. Persistence uses fire-and-forget asyncio.create_task with a 'latest' debounce pattern — allow ~1.5s after WS close before asserting persistence via GET /api/documents/{id}. Backend tests file: /app/backend/tests/test_new_features.py uses raw asyncio.run per test (no pytest-asyncio dep). Frontend Playwright test used two browser contexts (browser.new_context()) — the existing single-tab mocking of localStorage token + navigation to /document/:id worked reliably.",
+  "rca_of_the_issue": "No new issues found. Both new features (file validation + real-time WebSocket collaboration) work correctly end-to-end at API level and UI level. Regression suite (36 tests) unchanged and passing."
+}
