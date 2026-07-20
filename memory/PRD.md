@@ -74,21 +74,40 @@ CloudCollab is a modern collaborative workspace platform that combines team mana
 - Comprehensive data-testid attributes
 
 ### Testing
-- 36 backend pytest tests - 100% pass rate
+- 50 backend pytest tests - 100% pass rate (36 baseline + 14 new: config, file validation, WebSocket collab)
 - Full end-to-end frontend flow testing - 100% pass rate
+- Real-time WebSocket collaboration verified across two browser contexts
 - Fixed critical JWT bug (jwt.JWTError -> jwt.InvalidTokenError)
+
+### Real-time Collaboration (NEW - Jan 2026)
+- WebSocket endpoint: `/api/ws/documents/{document_id}?token=<jwt>`
+- Message types: `active_users`, `content_change`, `title_change`, `cursor`, `ping`
+- Presence indicators (colored avatar chips) in DocumentEditor
+- Live/Offline connection status
+- Changes auto-persist to MongoDB via fire-and-forget debounced writes
+- Server does not echo sender's own messages (loop-free)
+
+### File Validation (NEW - Jan 2026)
+- Configurable size limit via `MAX_FILE_SIZE_MB` env var (default: 10MB)
+- Whitelist of allowed extensions (images, docs, spreadsheets, presentations, archives, code, small audio/video)
+- Public `/api/config` endpoint exposes limits to frontend
+- Client-side validation prevents unnecessary requests
+- Server-side validation returns 413 (too large) / 400 (bad type) with clear error messages
 
 ## Prioritized Backlog
 
 ### P0 - Critical (Complete)
 - All core features implemented and tested
+- Real-time collaboration via WebSockets (documents)
+- File size/type validation
 
 ### P1 - High Priority Enhancements
-- Real-time collaboration using WebSockets
 - Rich text editor for documents (currently plain textarea)
 - File preview capabilities (images, PDFs)
 - Email notifications for invitations
 - Password reset flow
+- S3/cloud storage backend for files (structure is ready, just swap `UPLOAD_DIR` + `open()` for boto3 S3 client)
+- WebSocket auto-reconnect with exponential backoff
 
 ### P2 - Nice to Have
 - Document version history
@@ -124,3 +143,11 @@ CloudCollab is a modern collaborative workspace platform that combines team mana
   - Fixed JWT error handling bug
   - Added comprehensive test suite (36 backend tests)
   - All 14 frontend user flows verified via testing agent
+- **2026-01-20 (iter 2)**: Real-time collaboration + file validation
+  - Added WebSocket endpoint `/api/ws/documents/{id}` with presence + live sync
+  - Added DocumentConnectionManager for per-document broadcast
+  - Added file size (10MB) + extension whitelist validation
+  - Added `/api/config` endpoint for client-side validation
+  - Frontend: `useDocumentSocket` hook, presence chips, Live indicator in DocumentEditor
+  - Frontend: client-side file validation with clear error toasts
+  - Test suite grew to 50/50 backend tests, all passing

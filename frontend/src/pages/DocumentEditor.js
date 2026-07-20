@@ -169,7 +169,7 @@ export default function DocumentEditor() {
                     </div>
                   )}
                 </div>
-                <span className="text-xs text-gray-500">
+                <span className="text-xs text-gray-500 ml-1">
                   {otherUsers.length} other{otherUsers.length === 1 ? '' : 's'} editing
                 </span>
               </div>
