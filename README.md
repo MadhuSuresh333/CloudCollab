@@ -2,8 +2,7 @@
 
 A cloud-based collaborative workspace designed to help remote teams communicate, manage projects, assign tasks, and securely share files—all from a single platform.
 
-> **🚧 Project Status:** This project is currently under active development. Core features have been implemented, and bug fixing, optimization, and feature enhancements are ongoing.
-
+>
 ---
 
 # 📖 Description
